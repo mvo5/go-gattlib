@@ -2,7 +2,6 @@ package gattlib
 
 import (
 	"fmt"
-	"time"
 	"unsafe"
 )
 
@@ -11,7 +10,7 @@ import (
 /*
 #cgo pkg-config: glib-2.0 bluez
 #cgo CFLAGS: -I./bluez
-#cgo LDFLAGS: -L./ -lgattlib 
+#cgo LDFLAGS: -L./ -lgattlib
 
 #include <stdbool.h>
 #include <glib.h>
@@ -27,27 +26,28 @@ struct connection_result {
     bool done;
     GError *err;
     GAttrib *attrib;
+
+    // go-data
+    void *goCtx;
 };
 typedef struct connection_result connection_result_t;
 
-void my_connect_cb(GIOChannel *io, GError *err, gpointer user_data) {
-    printf("my_connect_cb %x\n", err);
-    struct connection_result *res = (struct connection_result*)(user_data);
-    res->done = true;
-    res->err = err;
-    if (err) {
-             return;
-    }
-    // XXX: detect mtu
-    uint16_t mtu = ATT_DEFAULT_LE_MTU;
-    res->attrib = g_attrib_new(io, mtu);
-    // XXX: support notify, cf gatttool.c connect_cb()
-}
+void my_connect_cb(GIOChannel *io, GError *err, gpointer user_data);
 */
 import "C"
 
 type Connection struct {
 	attrib *C.GAttrib
+}
+
+type goCtx struct {
+	doneCh chan bool
+}
+
+//export connectionDone
+func connectionDone(res *C.connection_result_t) {
+	ctx := (*goCtx)(unsafe.Pointer(res.goCtx))
+	ctx.doneCh <- true
 }
 
 func Connect(dest string) (*Connection, error) {
@@ -60,22 +60,19 @@ func Connect(dest string) (*Connection, error) {
 	optMtu := C.int(0)
 	var gerr *C.GError
 
-	res := C.connection_result_t{}
+	ctx := goCtx{
+		doneCh: make(chan bool),
+	}
+	res := C.connection_result_t{goCtx: unsafe.Pointer(&ctx)}
 	chann := C.gatt_connect(optSrc, optDest, optDstType, optSecLevel, optPsm, optMtu, (C.BtIOConnect)(C.my_connect_cb), &gerr, (C.gpointer)(unsafe.Pointer(&res)))
 	if chann == nil {
-		return nil,fmt.Errorf("cannot try to connect: %v", gerr.message)
+		return nil, fmt.Errorf("cannot try to connect: %v", gerr.message)
 	}
-	// XXX: horrible
-	for {
-		if res.done {
-			break
-		}
-		time.Sleep(1*time.Second)
-	}
+	<-ctx.doneCh
 	if res.err != nil {
-		return nil,fmt.Errorf("cannot connect: %v", res.err.message)
+		return nil, fmt.Errorf("cannot connect: %v", res.err.message)
 	}
-	
+
 	return &Connection{
 		attrib: res.attrib,
 	}, nil
